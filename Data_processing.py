@@ -636,20 +636,28 @@ data_all = {
     "m3gnet": [],
     "upet": [],
     "fairchem": [],
+    "tace": [],
+    "prophet": [],
 }
 
 
 # In[247]:
 
 
-for type_calc in data_all.keys():
+missing = []
+for type_calc in list(data_all.keys()):
     data_path = f"{path_data}/energies_{type_calc}.csv"
-    
+    if not os.path.isfile(data_path):
+        print(f"Skipping {type_calc}: no {data_path}")
+        missing.append(type_calc)
+        continue
     data = pd.read_csv(data_path)
     names = data["name"].to_list()
     values = np.array(data[f"energy_{type_calc}"].to_list()) / 16
-
     data_all[type_calc] = values
+
+for type_calc in missing:
+    del data_all[type_calc]
     
     
 
@@ -701,19 +709,21 @@ names
 # In[251]:
 
 
-colors = {
-    "dft": "green",
-    "mace": 'red',
-    "grace": 'blue',
-    "mattersim": 'magenta',
-    "sevennet": 'black',
-    "chgnet": 'orange',
-    "alignn": "orchid",
-    "m3gnet": "olive",
-    "upet": "darkcyan",
-    "fairchem": "indigo",
-    "nequip": "maroon",
-}
+import sys
+from pathlib import Path
+
+def _repo_root():
+    here = Path.cwd().resolve()
+    for cand in [here, *here.parents]:
+        if (cand / "plot_colors.py").is_file():
+            return cand
+    raise FileNotFoundError("plot_colors.py not found from " + str(here))
+
+sys.path.insert(0, str(_repo_root()))
+from plot_colors import series_colors
+
+_cols = series_colors(len(data_all))
+colors = {name: col for name, col in zip(data_all, _cols)}
 
 
 # In[252]:
@@ -902,130 +912,6 @@ plt.show()
 st_names = ["layered_p1", "layered_p-1", "layered_p2c", "layered_p21", "layered_p21c", "alpha", "beta", "gamma", "delta"]
 
 
-# In[211]:
-
-
-path_dft = "/home/a.burov/icys_2025/niohf/optimized/dft/"
-path_sevennet = "/home/a.burov/icys_2025/niohf/optimized/sevenn/"
-path_chgnet = "/home/a.burov/icys_2025/niohf/optimized/chgnet/"
-
-path_alignn = "/home/a.burov/icys_2025/niohf/optimized/alignn/"
-path_fairchem = "/home/a.burov/icys_2025/niohf/optimized/fairchem/"
-path_grace = "/home/a.burov/icys_2025/niohf/optimized/grace/"
-path_m3gnet = "/home/a.burov/icys_2025/niohf/optimized/m3gnet/"
-path_mace = "/home/a.burov/icys_2025/niohf/optimized/mace/"
-path_mattersim = "/home/a.burov/icys_2025/niohf/optimized/mattersim/"
-path_nequip = "/home/a.burov/icys_2025/niohf/optimized/nequip/"
-path_upet = "/home/a.burov/icys_2025/niohf/optimized/upet/"
-
-
-# In[ ]:
-
-
-
-
-
-# In[212]:
-
-
-diffs_dir = {}
-
-for name in st_names:
-    # st_dft = smart_structure_read(path_dft + name + ".POSCAR")
-    st_dft = smart_structure_read(path_dft + name + ".vasp")
-    st_sevennet = smart_structure_read(path_sevennet + name + ".vasp")
-    st_chgnet = smart_structure_read(path_chgnet + name + ".vasp")
-
-    coords_dft = np.array(st_dft.xred)
-    coords_sevennet = np.array(st_sevennet.xred)
-    coords_chgnet = np.array(st_chgnet.xred)
-
-    frac_diff = coords_sevennet - coords_dft
-    frac_diff_sevennet = frac_diff - np.round(frac_diff)
-    distance_sevennet = np.linalg.norm(frac_diff_sevennet)
-
-    frac_diff = coords_chgnet - coords_dft
-    frac_diff_chgnet = frac_diff - np.round(frac_diff)
-    distance_chgnet = np.linalg.norm(frac_diff_chgnet)
-
-    # print(distance_sevennet, distance_chgnet, )
-
-    diffs_dir[name] = {}
-    diffs_dir[name]["sevennet"] = np.sum(frac_diff_sevennet**2, axis=1)**0.5
-    diffs_dir[name]["chgnet"] = np.sum(frac_diff_chgnet**2, axis=1)**0.5
-    
-    
-
-
-# In[ ]:
-
-
-
-
-
-# In[219]:
-
-
-fontsize = 14
-lw = 2.0
-
-phases = list(diffs_dir.keys())
-seven = [diffs_dir[p]['sevennet'] for p in phases]
-chg   = [diffs_dir[p]['chgnet']   for p in phases]
-
-x = np.arange(len(phases), dtype=float)
-width = 0.35
-
-fig, ax = plt.subplots(figsize=(7,4))
-# draw two sets of boxplots with small offsets
-bp1 = ax.boxplot(seven, positions=x - width/2, widths=0.25, patch_artist=True, showmeans=True)
-bp2 = ax.boxplot(chg,   positions=x + width/2, widths=0.25, patch_artist=True, showmeans=True)
-
-# color/legend
-for b in bp1['boxes']:
-    b.set_facecolor('royalblue')
-    b.set_alpha(0.3)
-for cap in bp1['caps']:
-    cap.set(color="royalblue", linewidth=1.5)
-for whisker in bp1['whiskers']:
-    whisker.set(color="royalblue", linewidth=1.5)
-for median in bp1['medians']:
-    median.set(color="black", linewidth=1.5)
-for mean in bp1['means']:
-    mean.set(marker='s', markeredgecolor="black", markerfacecolor="black", markersize=5)
-
-for b in bp2['boxes']:
-    b.set_facecolor('red')
-    b.set_alpha(0.3)
-for cap in bp2['caps']:
-    cap.set(color="red", linewidth=1.5)
-for whisker in bp2['whiskers']:
-    whisker.set(color="red", linewidth=1.5)
-for median in bp2['medians']:
-    median.set(color="black", linewidth=1.5)
-for mean in bp2['means']:
-    mean.set(marker='s', markeredgecolor="black", markerfacecolor="black", markersize=5)
-
-
-ax.tick_params(axis='both', which='major', labelsize=fontsize)
-ax.tick_params(axis='both', which='minor', labelsize=fontsize-2)
-ax.yaxis.get_offset_text().set_fontsize(10)
-ax.xaxis.set_tick_params(width=2, length=7)
-ax.yaxis.set_tick_params(width=2, length=7)
-
-ax.set_xticks(x)
-ax.set_xticklabels(names_plot, rotation=45)
-ax.set_xlabel('Ni(OH)F phase', fontsize=fontsize)
-ax.set_ylabel('Relative error in atomic positions', fontsize=fontsize)
-ax.legend([bp1['boxes'][0], bp2['boxes'][0]], ['sevennet', 'chgnet'], 
-          loc=(1), edgecolor="black", fontsize=fontsize)
-
-
-fig.tight_layout()
-plt.show()
-
-fig.savefig("/home/a.burov/icys_2025/niohf/data/figures/atomic_pos_old.png", dpi=450)
-fig.savefig("/home/a.burov/icys_2025/niohf/data/figures/atomic_pos_old.pdf", dpi=450)
 
 
 
@@ -1056,7 +942,7 @@ path_dft = "/home/a.burov/icys_2025/niohf/optimized/dft/"
 # In[220]:
 
 
-# Dictionary of ALL potentials (10 total)
+# Dictionary of ALL potentials
 potentials = {
     "sevennet": "/home/a.burov/icys_2025/niohf/optimized/sevenn/",
     "chgnet": "/home/a.burov/icys_2025/niohf/optimized/chgnet/",
@@ -1067,12 +953,26 @@ potentials = {
     "mace": "/home/a.burov/icys_2025/niohf/optimized/mace/",
     "mattersim": "/home/a.burov/icys_2025/niohf/optimized/mattersim/",
     "nequip": "/home/a.burov/icys_2025/niohf/optimized/nequip/",
-    "upet": "/home/a.burov/icys_2025/niohf/optimized/upet/"
+    "upet": "/home/a.burov/icys_2025/niohf/optimized/upet/",
+    "tace": "/home/a.burov/icys_2025/niohf/optimized/tace/",
+    "prophet": "/home/a.burov/icys_2025/niohf/optimized/prophet/",
 }
 
 
 # In[221]:
 
+
+_available = {}
+for pot_name, pot_path in potentials.items():
+    missing_files = [
+        name for name in st_names
+        if not os.path.isfile(os.path.join(pot_path, name + ".vasp"))
+    ]
+    if missing_files:
+        print(f"Skipping {pot_name}: missing {', '.join(missing_files)}")
+        continue
+    _available[pot_name] = pot_path
+potentials = _available
 
 diffs_dir = {}
 
@@ -1219,11 +1119,12 @@ fontsize = 18
 
 # Layered bars (left)
 layered_vals = [rmse_data[pot]['layered'] for pot in potentials_list]
-bars1 = ax.bar(x - width/2, layered_vals, width, label='Layered', alpha=0.4, edgecolor='forestgreen', color="forestgreen")
+c_layered, c_dispersed = series_colors(2)
+bars1 = ax.bar(x - width/2, layered_vals, width, label='Layered', alpha=0.4, edgecolor=c_layered, color=c_layered)
 
 # Dispersed bars (right)  
 dispersed_vals = [rmse_data[pot]['dispersed'] for pot in potentials_list]
-bars2 = ax.bar(x + width/2, dispersed_vals, width, label='Dispersed', alpha=0.4, edgecolor='blue', color="blue")
+bars2 = ax.bar(x + width/2, dispersed_vals, width, label='Dispersed', alpha=0.4, edgecolor=c_dispersed, color=c_dispersed)
 
 # Formatting
 ax.set_xlabel('UMLIP type', fontsize=fontsize)
@@ -1335,518 +1236,6 @@ symmetrized_structure
 
 
 
-
-
-# ## XRD profiles
-
-# In[ ]:
-
-
-from pymatgen.core import Structure
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-data_xrd_path = "/home/a.burov/icys_2025/niohf/data/NiOHF_clean_#01.gdf"
-
-
-# In[ ]:
-
-
-with open(data_xrd_path, 'r', encoding='latin-1') as f:
-    lines = f.readlines() 
-
-
-# In[ ]:
-
-
-for idx, line in enumerate(lines):
-    if '<beginc><endc>' in line:
-        print(f"Found at line {idx}: {line.strip()}")
-        break
-
-
-# In[ ]:
-
-
-idx
-
-
-# In[ ]:
-
-
-angle_min = float(lines[idx+1])
-angle_max = float(lines[idx+2])
-step = float(lines[idx+3])
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-int_xrd = [int(inten) for inten in lines[idx+7:]]
-
-
-# In[ ]:
-
-
-angles_xrd = [angle_min + (entry_num-idx-7)*step for entry_num in range(idx+7, len(lines), 1) ]
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-# calculator = XRDCalculator(wavelength="CuKa", symprec=1e-10, 
-#                debye_waller_factors={"Ni": 0.3, "O": 0.5, "H": 1.5, "F": 0.4})  # Cu Kα radiation (1.5406 Å)
-
-calculator = XRDCalculator(wavelength="CoKa1", symprec=1e-10, 
-               debye_waller_factors={"Ni": 0.3, "O": 0.5, "H": 1.5, "F": 0.4})  # Cu Kα radiation (1.5406 Å)
-
-
-# Ni	0.3 - 0.5	Heavy transition metal, low thermal motion
-# O	0.5 - 0.8	Moderate thermal motion in oxide framework
-# H	1.5 - 2.5	Lightest atom, highest thermal displacement
-# F	0.4 - 0.7  Similar to O, but slightly lower in fluorides
-
-
-# In[ ]:
-
-
-# latt_scale_factor = 0.87
-latt_scale_factor = 1.0
-
-
-# In[ ]:
-
-
-structure_diaspore = db['delta.sc', '9bulk_eos', 100].copy().end
-latt = np.array(structure_diaspore.rprimd)
-structure_diaspore.rprimd = latt * latt_scale_factor
-structure_diaspore.update_xcart()
-structure_diaspore.update_xred()
-
-
-# In[ ]:
-
-
-structure_diaspore = structure_diaspore.convert2pymatgen()
-pattern_diaspore = calculator.get_pattern(structure_diaspore, two_theta_range=(0, 100))
-
-
-# In[ ]:
-
-
-structure_layered = db["layered", '9bulk', 1].copy().end
-structure_layered = structure_layered.get_conventional_cell()
-latt = np.array(structure_layered.rprimd)
-structure_layered.rprimd = latt * latt_scale_factor
-structure_layered.update_xcart()
-structure_layered.update_xred()
-
-
-
-# In[ ]:
-
-
-structure_layered = structure_layered.convert2pymatgen()
-
-pattern_layered = calculator.get_pattern(structure_layered, two_theta_range=(0, 100))
-
-
-# In[ ]:
-
-
-st_layered = Structure.from_file("/home/a.burov/icys_2025/niohf/optimized/sevenn/layered.cif")
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-# structure_layered = db["layered", '9bulk', 1].copy().end
-# structure_layered.write_cif("/home/a.burov/icys_2025/niohf/data/layered_dft.cif")
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-int_list = pattern_layered.as_dict()["y"]
-theta_list = pattern_layered.as_dict()["x"]
-
-hkl_list = []
-for mill_idx in pattern_layered.as_dict()["hkls"]: 
-    hkl_cur = mill_idx[0]['hkl'] 
-    hkl_cur = [str(hkl) for hkl in hkl_cur ]
-    hkl_cur = "".join(hkl_cur)
-    hkl_list.append(hkl_cur)
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-fontsize = 14
-lw = 2.0
-width = 0.3
-
-fig, ax = plt.subplots(1, 1, figsize=(7, 4), dpi=600)
-plt.tight_layout()
-
-
-# Add titles and labels
-ax.set_ylabel(r'Intensity', fontsize=fontsize)
-ax.set_xlabel(r'$2\Theta$, degrees', fontsize=fontsize)
-
-ax.tick_params(axis='both', which='major', labelsize=fontsize)
-ax.tick_params(axis='both', which='minor', labelsize=fontsize-2)
-ax.yaxis.get_offset_text().set_fontsize(10)
-ax.xaxis.set_tick_params(width=2, length=7)
-ax.yaxis.set_tick_params(width=2, length=7)
-
-shift_angle = 0
-ax.plot(angles_xrd, np.array(int_xrd)/max(int_xrd),  label='experiment')
-plt.bar(pattern_layered.x + shift_angle, pattern_layered.y/max(pattern_layered.y), width=0.3, color='red', label='layered')
-plt.bar(pattern_diaspore.x + shift_angle, pattern_diaspore.y/max(pattern_diaspore.y), width=0.3, color='green', label='diaspore')
-
-plt.legend(fontsize=fontsize-4, loc=1)
-
-
-fig.tight_layout()
-fig.savefig("/home/a.burov/icys_2025/niohf/data/figures/xrd_both.png", dpi=450)
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# ## Single-phase sample
-
-# In[ ]:
-
-
-exp_data = np.loadtxt("/home/a.burov/icys_2025/niohf/data/Ni(OH)F_8h_50ml.xy")
-# Assign to arrays
-angles_list = exp_data[:, 0]  # First column
-int_list = exp_data[:, 1]     # Second column
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-calculator = XRDCalculator(wavelength="CuKa1", symprec=1e-10, 
-               debye_waller_factors={"Ni": 0.3, "O": 0.5, "H": 1.5, "F": 0.4})  # Cu Kα radiation (1.5406 Å)
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-structure_layered = db["layered", '9bulk', 1].copy().end
-# structure_layered = structure_layered.get_conventional_cell()
-structure_layered = structure_layered.get_primitive_cell()
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-structure_layered = structure_layered.convert2pymatgen()
-
-
-# In[ ]:
-
-
-pattern_layered = calculator.get_pattern(structure_layered, two_theta_range=(0, 100))
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-hkl_list = []
-for mill_idx in pattern_layered.as_dict()["hkls"]: 
-    hkl_cur = mill_idx[0]['hkl'] 
-    hkl_cur = [str(hkl) for hkl in hkl_cur ]
-    hkl_cur = "".join(hkl_cur)
-    hkl_list.append(hkl_cur)
-
-
-# In[ ]:
-
-
-hkl_list
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-fontsize = 14
-lw = 2.0
-width = 0.3
-
-fig, ax = plt.subplots(1, 1, figsize=(7, 4), dpi=600)
-plt.tight_layout()
-
-
-# Add titles and labels
-ax.set_ylabel(r'Intensity', fontsize=fontsize)
-ax.set_xlabel(r'$2\Theta$, degrees', fontsize=fontsize)
-
-ax.tick_params(axis='both', which='major', labelsize=fontsize)
-ax.tick_params(axis='both', which='minor', labelsize=fontsize-2)
-ax.yaxis.get_offset_text().set_fontsize(10)
-ax.xaxis.set_tick_params(width=2, length=7)
-ax.yaxis.set_tick_params(width=2, length=7)
-
-shift_angle = 0
-ax.plot(angles_list, np.array(int_list)/max(int_list),  label='experiment', zorder=1)
-plt.bar(pattern_layered.x + shift_angle, pattern_layered.y/max(pattern_layered.y), width=0.2, color='red', label='layered', zorder=2)
-
-plt.legend(fontsize=10, loc=1)
-
-
-fig.tight_layout()
-fig.savefig("/home/a.burov/icys_2025/niohf/data/figures/xrd_layered.png", dpi=450)
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# ### LNO test with Co source
-
-# In[ ]:
-
-
-import pymatgen as pm
-from pymatgen.analysis.diffraction.xrd import XRDCalculator
-from pymatgen.io.ase import AseAtomsAdaptor
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-exp_data = np.loadtxt("/home/a.burov/icys_2025/niohf/data/LNO1_A.xyd")
-# Assign to arrays
-angles_list = exp_data[:, 0]  # First column
-int_list = exp_data[:, 1]     # Second column
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-st_ase = read("/home/a.burov/icys_2025/niohf/data/LNO.cif")
-
-
-# In[ ]:
-
-
-structure_lno = AseAtomsAdaptor.get_structure(st_ase)
-
-
-# In[ ]:
-
-
-structure_lno.get_space_group_info()
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-xrd = XRDCalculator(wavelength="CoKa") #initiate XRD calculator (can specify various options here)
-structure_lno_pattern = xrd.get_pattern(structure_lno, scaled=True, two_theta_range=(0, 100))
-
-
-# In[ ]:
-
-
-structure_lno_pattern
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-hkl_list = []
-for mill_idx in structure_lno_pattern.as_dict()["hkls"]: 
-    hkl_cur = mill_idx[0]['hkl'] 
-    hkl_cur = [str(hkl) for hkl in hkl_cur ]
-    hkl_cur = "".join(hkl_cur)
-    hkl_list.append(hkl_cur)
-
-print(hkl_list)
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-fontsize = 14
-lw = 2.0
-width = 0.3
-
-fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=600)
-plt.tight_layout()
-
-
-# Add titles and labels
-ax.set_ylabel(r'Intensity', fontsize=fontsize)
-ax.set_xlabel(r'$2\Theta$, degrees', fontsize=fontsize)
-
-ax.tick_params(axis='both', which='major', labelsize=fontsize)
-ax.tick_params(axis='both', which='minor', labelsize=fontsize-2)
-ax.yaxis.get_offset_text().set_fontsize(10)
-ax.xaxis.set_tick_params(width=2, length=7)
-ax.yaxis.set_tick_params(width=2, length=7)
-
-shift_angle = 0
-ax.plot(angles_list, np.array(int_list)/max(int_list),  label='experiment', zorder=1)
-plt.bar(structure_lno_pattern.x + shift_angle, structure_lno_pattern.y/max(structure_lno_pattern.y), width=0.2, color='red', label='LNO', zorder=2)
-
-# plt.plot(tt, I, width=0.2, color='red', label='layered', zorder=2)
-
-plt.legend(fontsize=10, loc=1)
-
-
-fig.tight_layout()
-fig.savefig("/home/a.burov/icys_2025/niohf/data/figures/xrd_lno.png", dpi=450)
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
 
 
 write_database()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# In[1]:
 
 
 from ase.optimize import FIRE  
@@ -9,16 +9,7 @@ from ase import Atoms
 from ase.optimize import BFGS
 from ase import Atoms
 from ase.geometry import cellpar_to_cell
-from ase.io import read, write
 
-import warnings
-
-from m3gnet.models import Relaxer, M3GNet, Potential
-from pymatgen.core import Lattice, Structure
-
-for category in (UserWarning, DeprecationWarning):
-    warnings.filterwarnings("ignore", category=category, module="tensorflow")
-    
 from pymatgen.core import Lattice, Structure
 from pymatgen.core import Structure
 from pathlib import Path
@@ -26,21 +17,12 @@ from pymatgen.io.ase import AseAtomsAdaptor
 import numpy as np
 
 
-def _xyz_safe(atoms):
-    """extxyz requires stress as 6 Voigt components; M3GNet stores a 3x3 tensor."""
-    atoms = atoms.copy()
-    stress = atoms.info.pop("stress", None)
-    if stress is None:
-        return atoms
-    s = np.asarray(stress, dtype=float)
-    if s.shape == (3, 3):
-        atoms.info["stress"] = np.array(
-            [s[0, 0], s[1, 1], s[2, 2], s[1, 2], s[0, 2], s[0, 1]]
-        )
-    elif s.size == 6:
-        atoms.info["stress"] = s.reshape(6)
-    return atoms
 
+# In[2]:
+
+
+MODEL_DIR = "/home/a.burov/soft/umlip/potentials"
+from GGNN.common.calculator import UCalculator
 
 
 # In[ ]:
@@ -49,7 +31,7 @@ def _xyz_safe(atoms):
 
 
 
-# In[ ]:
+# In[3]:
 
 
 data_dir = {
@@ -72,10 +54,10 @@ data_dir = {
 
 
 
-# In[ ]:
+# In[4]:
 
 
-def m3gnet_calc(st, st_name, path_save, max_force=0.05, steps=20):
+def ggnn_calc(st, st_name, path_save, max_force=0.05, steps=20):
     """
     INPUT:
         st (ase Structure)
@@ -84,56 +66,46 @@ def m3gnet_calc(st, st_name, path_save, max_force=0.05, steps=20):
     """
     
     # Store original positions and species
-    original_symbols = [site.specie.symbol for site in st]
+    original_symbols = st.get_chemical_symbols()
+    original_positions = st.get_scaled_positions().copy()
+    
+    # Assign calculator
+    st.calc = ggnn_model
     
     # Optimize
-    result = m3gnet_model.relax(st, verbose=True, fmax=max_force, steps=steps)
+    optim = FIRE(st, dt=0.05, maxstep=0.5)
+    optim.run(fmax=max_force, steps=steps)
 
-    # Relaxed structure
-    st_relaxed = result["final_structure"]
-    
-    # Check if atom order changed
-    relaxed_symbols = [site.specie.symbol for site in st_relaxed]
-    
-    if relaxed_symbols != original_symbols:
-        print(f"WARNING: Atom order changed in {st_name} during CHGNet relaxation!")
+    # Check if order changed
+    new_symbols = st.get_chemical_symbols()
+    if new_symbols != original_symbols:
+        print(f"WARNING: Atom order changed for {st_name}!")
         
-        # Match atoms based on positions
+        # Try to restore order by matching positions
         from scipy.optimize import linear_sum_assignment
         
-        orig_coords = np.array([site.frac_coords for site in st])
-        relax_coords = np.array([site.frac_coords for site in st_relaxed])
-        
-        # Build distance matrix with PBC
+        new_positions = st.get_scaled_positions()
         n_atoms = len(st)
         dist_matrix = np.zeros((n_atoms, n_atoms))
         
         for i in range(n_atoms):
             for j in range(n_atoms):
-                diff = orig_coords[i] - relax_coords[j]
-                diff = diff - np.round(diff)  # PBC
-                cart_diff = st.lattice.get_cartesian_coords(diff)
-                dist_matrix[i, j] = np.linalg.norm(cart_diff)
+                diff = original_positions[i] - new_positions[j]
+                diff = diff - np.round(diff)
+                dist_matrix[i, j] = np.linalg.norm(diff)
         
-        # Find optimal matching
         _, col_ind = linear_sum_assignment(dist_matrix)
         
-        # Reorder relaxed structure
-        sites_reordered = [st_relaxed[j] for j in col_ind]
-        from pymatgen.core import Structure
-        st_relaxed = Structure.from_sites(sites_reordered)
-        
+        # Reorder
+        st = st[col_ind]
         print(f"  Reordered atoms for {st_name}")
-        
+    
     # Save
-    st_relaxed.to(filename=path_save + f"/{st_name}.cif")
-
-    atoms_relaxed = AseAtomsAdaptor.get_atoms(st_relaxed)  # convert to ASE Atoms [web:68]
-    write(path_save + f'/{st_name}.xyz', _xyz_safe(atoms_relaxed))
-    write(path_save + f'/{st_name}.vasp', atoms_relaxed)     # ASE infers format from .xyz [web:62]
+    st.write(path_save + f"/{st_name}.cif")
+    st.write(path_save + f"/{st_name}.xyz")    
+    st.write(path_save + f"/{st_name}.vasp")    
     
-    return st_relaxed, result
-    
+    return st, optim
 
 
 # In[ ]:
@@ -142,21 +114,21 @@ def m3gnet_calc(st, st_name, path_save, max_force=0.05, steps=20):
 
 
 
-# In[ ]:
+# In[5]:
 
 
 # path to save data
 path_save = "/home/a.burov/icys_2025/niohf/optimized/"
 
 
-# In[ ]:
+# In[6]:
 
 
 # create directory for files if it does not exist
 Path(f"{path_save}").mkdir(parents=True, exist_ok=True)
 
 # create directories for each type of calculations if they do not exist
-Path(f"{path_save}/m3gnet").mkdir(parents=True, exist_ok=True)
+Path(f"{path_save}/ggnn").mkdir(parents=True, exist_ok=True)
 
 
 # In[ ]:
@@ -165,25 +137,28 @@ Path(f"{path_save}/m3gnet").mkdir(parents=True, exist_ok=True)
 
 
 
-# In[ ]:
+# In[7]:
 
 
-path_save_m3gnet = path_save + "/m3gnet/"
+path_save_ggnn = path_save + "/ggnn/"
 
 
-# In[ ]:
+# In[8]:
 
 
-m3gnet_model = Relaxer(optimizer='FIRE', relax_cell=True)  # This loads the default pre-trained model
-
-
-# In[ ]:
-
-
-
+ggnn_model = UCalculator(
+    checkpoint_path=f"{MODEL_DIR}/equflash-OMat24.pt",
+    cpu=True,  # zen4
+)
 
 
 # In[ ]:
+
+
+
+
+
+# In[9]:
 
 
 for name, vals in data_dir.items():
@@ -206,9 +181,15 @@ for name, vals in data_dir.items():
     st_ase.write(path_save + f"dft/{name}.vasp")    
     
     # Run calculations
-    st_relaxed_m3gnet, result = m3gnet_calc(st_pmg.copy(), name, path_save_m3gnet, steps=300)
+    st_relaxed_ggnn, optim = ggnn_calc(st_ase.copy(), name, path_save + "/ggnn", steps=300)
+    
+    data_dir[name]['energy_ggnn'] = st_relaxed_ggnn.get_potential_energy()
+    
 
-    data_dir[name]['energy_m3gnet'] = result["trajectory"].energies[-1]
+
+# In[ ]:
+
+
 
 
 
@@ -218,23 +199,23 @@ for name, vals in data_dir.items():
 
 
 
-# In[ ]:
+# In[17]:
 
 
 import csv
 
 
-# In[ ]:
+# In[18]:
 
 
-path_energies = '/home/a.burov/icys_2025/niohf/optimized/energies_m3gnet.csv'
+path_energies = '/home/a.burov/icys_2025/niohf/optimized/energies_ggnn.csv'
 
 
-# In[ ]:
+# In[19]:
 
 
 # choose keys and order
-fieldnames = ['name', 'energy_m3gnet']
+fieldnames = ['name', 'energy_ggnn']
 
 
 rows = []
@@ -242,7 +223,7 @@ rows = []
 for key, val in data_dir.items():
     rows.append({
         'key': key,
-        'energy_m3gnet': val['energy_m3gnet'],
+        'energy_ggnn': val['energy_ggnn'],
     })
 
 
@@ -250,7 +231,7 @@ with open(path_energies, 'w', newline='') as f:
     w = csv.writer(f)
     w.writerow(fieldnames)
     for key, val in data_dir.items():
-        w.writerow([key, val['energy_m3gnet'], ])
+        w.writerow([key, val['energy_ggnn'], ])
         
 
     
@@ -262,7 +243,7 @@ with open(path_energies, 'w', newline='') as f:
 
 
 
-# In[ ]:
+# In[20]:
 
 
 print(f"CSV written to: {path_energies}")

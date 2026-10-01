@@ -15,7 +15,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from ase.io import read, write
-from ase.optimize import FIRE
+from ase.optimize import FIRE, LBFGS
 from ase import Atoms
 from phonopy import Phonopy
 from phonopy.structure.atoms import PhonopyAtoms
@@ -109,7 +109,16 @@ plt.rcParams['figure.dpi'] = 450
 # In[2]:
 
 
-path_base = "/home/a.burov/icys_2025/niohf/optimized/alignn/"
+path_base = (
+    "/home/arseniy/Desktop/work/niohf/optimized/alignn"
+    if Path("/home/arseniy/Desktop/work/niohf/optimized/alignn").exists()
+    else "/home/a.burov/icys_2025/niohf/optimized/alignn/"
+)
+_UMLP_OUT = (
+    Path("/home/arseniy/Desktop/work/niohf/umlip_phonons")
+    if Path("/home/arseniy/Desktop/work/niohf/umlip_phonons").exists()
+    else Path("/home/a.burov/icys_2025/niohf/umlip_phonons")
+)
 
 
 # In[9]:
@@ -158,34 +167,219 @@ potential = "alignn"
 # In[12]:
 
 
-def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_used="msdb", scale=[0.97, 1.10] ):
+def _phonon_fig_dir():
+    for p in (
+        Path("/home/arseniy/Desktop/work/niohf/figures/phonons"),
+        Path("/home/a.burov/icys_2025/niohf/figures/phonons"),
+        Path("/home/a.burov/icys_2025/niohf/data/figures/phonons"),
+    ):
+        if p.exists() or p.parent.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            return str(p)
+    p = Path("/home/arseniy/Desktop/work/niohf/figures/phonons")
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
-    # Volume scaling
-    volume_points = 6
-    scale_init = scale[0]
-    scale_end = scale[1]
+
+def _select_eos_basin(volumes, energies, yaml_files, reverse_tol=0.05, spike_tol=0.20, min_keep=6):
+    """
+    Keep one convex E(V) bowl around the energy minimum for phonopy-qha.
+
+    ALIGNN often reconstructs at large expansion: E drops again after the
+    barrier, and a single point can spike by ~0.5 eV. Both break the QHA fit
+    (Gibbs jumps / vertical free-energy minima). Points past a reverse slope
+    are a second basin and are dropped. Remaining spikes are removed by
+    leave-one-out residuals, but only while the minimum stays interior.
+    Fewer than min_keep points (was 4 for gamma) produces discontinuous G(T).
+    """
+    v = np.asarray(volumes, dtype=float)
+    e = np.asarray(energies, dtype=float)
+    yaml_files = list(yaml_files)
+    order = np.argsort(v)
+    v, e = v[order], e[order]
+    yaml_files = [yaml_files[i] for i in order]
+
+    imin = int(np.argmin(e))
+    left = imin
+    for i in range(imin, 0, -1):
+        if e[i - 1] < e[i] - reverse_tol:
+            break
+        left = i - 1
+    right = imin
+    for i in range(imin, len(e) - 1):
+        if e[i + 1] < e[i] - reverse_tol:
+            break
+        right = i + 1
+
+    keep = np.zeros(len(e), dtype=bool)
+    keep[left:right + 1] = True
+    dropped = [
+        f"basin V={v[i]:.2f} E={e[i]:.4f}" for i in range(len(e)) if not keep[i]
+    ]
+
+    # Drop interior spikes, but never the current minimum and never so many
+    # that the minimum is pushed onto the volume edge.
+    while int(keep.sum()) > min_keep:
+        idx = np.where(keep)[0]
+        if len(idx) < 5:
+            break
+        loo = np.full(len(idx), np.nan)
+        for j, i in enumerate(idx):
+            if i == int(idx[np.argmin(e[idx])]):
+                continue
+            m = np.ones(len(idx), dtype=bool)
+            m[j] = False
+            coef = np.polyfit(v[idx][m], e[idx][m], 2)
+            loo[j] = e[i] - np.polyval(coef, v[i])
+        if not np.isfinite(loo).any() or np.nanmax(np.abs(loo)) < spike_tol:
+            break
+        jworst = int(np.nanargmax(np.abs(loo)))
+        trial = keep.copy()
+        trial[int(idx[jworst])] = False
+        tidx = np.where(trial)[0]
+        tmin = int(tidx[np.argmin(e[tidx])])
+        if tmin in (tidx[0], tidx[-1]):
+            break
+        keep = trial
+        i = int(idx[jworst])
+        dropped.append(f"spike V={v[i]:.2f} E={e[i]:.4f} loo={loo[jworst]:+.4f}")
+
+    if dropped:
+        print("EOS points excluded: " + ", ".join(dropped))
+
+    v2, e2 = v[keep], e[keep]
+    y2 = [yaml_files[i] for i, k in enumerate(keep) if k]
+    imin2 = int(np.argmin(e2))
+    if len(e2) < min_keep:
+        raise RuntimeError(
+            f"EOS basin has only {len(e2)} points (need ≥{min_keep}). "
+            f"V=[{v2[0]:.2f},{v2[-1]:.2f}]. Narrow the volume window to one "
+            f"bowl (avoid reconstructive expansion) and rerun."
+        )
+    if imin2 in (0, len(e2) - 1):
+        side = "compressed" if imin2 == 0 else "expanded"
+        raise RuntimeError(
+            f"EOS minimum is at the {side} edge "
+            f"(V={v2[imin2]:.2f} Å³, n={len(e2)}). "
+            f"Widen scale on that side and rerun; QHA on an edge minimum "
+            f"produces the discontinuous Gibbs curves."
+        )
+    return v2, e2, y2
+
+
+def _relax_ions_fixed_cell(atoms, tag, fmax=1e-4, steps=2000, maxstep=0.05):
+    """Relax ions with the cell held fixed.
+
+    FIRE (dt=0.03, 1000 steps) did not converge gamma: several volumes
+    reached fmax ~ 1e-3 and then walked uphill, so E(V) was jagged and
+    phonopy-qha put a ~2.8 eV jump in G(T) near 190 K. LBFGS with a short
+    maxstep stays in that basin and is required to hit fmax.
+    """
+    atoms.calc = alignn_cal
+    opt = LBFGS(
+        atoms,
+        trajectory=f"{tag}_relax.traj",
+        logfile=f"{tag}_opt.log",
+        maxstep=maxstep,
+    )
+    converged = opt.run(fmax=fmax, steps=steps)
+    fmax_now = float(np.max(np.linalg.norm(atoms.get_forces(), axis=1)))
+    if not converged or fmax_now > fmax:
+        raise RuntimeError(
+            f"{tag} did not reach fmax={fmax:.1e} "
+            f"(fmax={fmax_now:.4e} eV/Å after {steps} LBFGS steps). "
+            "An unconverged volume makes the gamma E(V) jagged and G(T) jumps."
+        )
+    return atoms
+
+
+def _fixed_volume_energy(equilibrium_atoms, scale_factor, tag, fmax=1e-4, steps=2000):
+    """Relax ions at a fixed volume scale and return (atoms, volume, energy)."""
+    scaled = equilibrium_atoms.copy()
+    scaled.set_cell(equilibrium_atoms.get_cell() * scale_factor ** (1 / 3), scale_atoms=True)
+    _relax_ions_fixed_cell(scaled, tag, fmax=fmax, steps=steps)
+    return scaled, float(scaled.get_volume()), float(scaled.get_potential_energy())
+
+
+def _bracket_volume_window(equilibrium_atoms, scale, n_probe=7, max_extend=4, min_width=0.12):
+    """
+    Cheap E(V) scan, then a phonon window with the minimum strictly inside.
+
+    ALIGNN layered cells keep their lowest energy at the compressed edge of
+    [0.76, 1.06]. Extending that edge here avoids 11 full phonon supercells
+    that _select_eos_basin would then reject.
+
+    Probe fmax matches the phonon loop (1e-4). A looser or unfinished probe
+    for gamma centered the window on an expanded local well; basin-cut then
+    left only 4 compressed points and a discontinuous G(T). Unconverged
+    FIRE (1000 steps) did the same: volumes walked uphill and G(T) jumped
+    by ~2.8 eV near 190 K.
+    """
+    lo, hi = float(scale[0]), float(scale[1])
+    print(f"Probing E(V) before phonons, start {lo:.3f}→{hi:.3f}")
+    for attempt in range(max_extend + 1):
+        probes = np.linspace(lo, hi, n_probe)
+        energies, vols = [], []
+        for i, s in enumerate(probes):
+            _, vol, en = _fixed_volume_energy(equilibrium_atoms, float(s), f"probe{attempt}_{i}")
+            energies.append(en)
+            vols.append(vol)
+            print(f"  probe {i + 1}/{n_probe} scale={s:.3f} V={vol:.2f} E={en:.4f}")
+        imin = int(np.argmin(energies))
+        if 0 < imin < n_probe - 1:
+            # Keep ≥ min_width around the minimum so QHA has enough points
+            # after basin pruning, without swallowing a second reconstructive well.
+            half = 0.5 * min_width
+            new_lo = max(lo, float(probes[imin]) - half)
+            new_hi = min(hi, float(probes[imin]) + half)
+            # Prefer probe neighbors when they already span the well.
+            neigh_lo = float(probes[max(imin - 1, 0)])
+            neigh_hi = float(probes[min(imin + 1, n_probe - 1)])
+            new_lo = min(new_lo, neigh_lo)
+            new_hi = max(new_hi, neigh_hi)
+            if new_hi - new_lo < min_width:
+                new_lo = float(probes[max(imin - 2, 0)])
+                new_hi = float(probes[min(imin + 2, n_probe - 1)])
+            print(
+                f"E(V) minimum at scale {probes[imin]:.3f} "
+                f"(V={vols[imin]:.2f}); phonon window {new_lo:.3f}→{new_hi:.3f}"
+            )
+            return new_lo, new_hi
+        span = hi - lo
+        if imin == 0:
+            lo = max(0.50, lo - 0.5 * span)
+            print(f"minimum still at the compressed edge; extending probes to {lo:.3f}→{hi:.3f}")
+        else:
+            hi = min(1.25, hi + 0.5 * span)
+            print(f"minimum still at the expanded edge; extending probes to {lo:.3f}→{hi:.3f}")
+    raise RuntimeError(
+        f"No interior E(V) minimum after probes {lo:.3f}→{hi:.3f}. "
+        "ALIGNN energy is still lowest at the edge of this window."
+    )
+
+
+def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_used="msdb", scale=[0.97, 1.10], volume_points=11):
+
+    scale_init, scale_end = _bracket_volume_window(equilibrium_atoms, scale)
     volume_scales = np.linspace(scale_init, scale_end, volume_points)
     volumes = []
     energies = []
+
+    for f in glob.glob("thermal_properties.yaml-*"):
+        os.remove(f)
     
     print("Starting QHA calculation with alignn...")
+    print(f"Volume scales {scale_init:.3f}→{scale_end:.3f} ({volume_points} pts)")
     
-    for i, scale in enumerate(volume_scales):
+    for i, scale_factor in enumerate(volume_scales):
         print(f"\n{'='*60}")
-        print(f"Volume point {i+1}/{volume_points}: scale = {scale:.4f}")
+        print(f"Volume point {i+1}/{volume_points}: scale = {scale_factor:.4f}")
         print(f"{'='*60}")
         
-        # Scale structure
-        scaled_atoms = equilibrium_atoms.copy()
-        scaled_atoms.set_cell(equilibrium_atoms.get_cell() * scale**(1/3), scale_atoms=True)
-        
-        # Relax at fixed volume
-        scaled_atoms.calc = alignn_cal
-        opt = FIRE(scaled_atoms, trajectory=f"vol_{i:02d}_relax.traj", logfile=f"vol_{i:02d}_opt.log", dt=0.03)
-        opt.run(fmax=1e-4, steps=1000)
-        
-        vol = scaled_atoms.get_volume()
-        en = scaled_atoms.get_potential_energy()
+        # Relax ions at fixed volume (no ExpCellFilter → cell stays fixed).
+        scaled_atoms, vol, en = _fixed_volume_energy(
+            equilibrium_atoms, float(scale_factor), f"vol_{i:02d}"
+        )
         volumes.append(vol)
         energies.append(en)
         
@@ -240,11 +434,14 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
         phonon.write_yaml_thermal_properties(filename=f"thermal_properties.yaml-{i:02d}")
         print(f"Saved thermal_properties.yaml-{i:02d}")
     
+    yaml_files = sorted(glob.glob("thermal_properties.yaml-*"))
+    volumes, energies, yaml_files = _select_eos_basin(volumes, energies, yaml_files)
+
     np.savetxt("e-v.dat", np.column_stack([volumes, energies]), 
                fmt="%.8f", header="# volume(Å³)  energy(eV)")
     print("\nSaved e-v.dat")
+    print(f"EOS points kept for QHA: {len(volumes)}  V=[{volumes.min():.2f},{volumes.max():.2f}]")
     
-    yaml_files = sorted(glob.glob("thermal_properties.yaml-*"))
     if not yaml_files:
         raise FileNotFoundError("No thermal_properties.yaml-* written; cannot run phonopy-qha")
 
@@ -309,7 +506,7 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
 
 def visualize_data(potential, structure):
     """Helmholtz / α / G plots from phonopy-qha outputs."""
-    fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
+    fig_dir = _phonon_fig_dir()
     os.makedirs(fig_dir, exist_ok=True)
 
     qha_files = (
@@ -485,17 +682,11 @@ def save_files(path_save):
 # In[18]:
 
 
+# Rerun only gamma: previous QHA kept 4 E(V) points after basin cut and G(T)
+# jumped by ~0.55 eV near 780 K. Compressed bowl is V≈150–158 (scale≈0.94–0.99);
+# avoid the reconstructive expanded well above ~1.02.
 structures_phases = [
-    "layered_p1", 
-    "layered_p-1",
-    "layered_p21",
-    "layered_p2c",
-    "layered_p21c",
-    
-    "alpha", 
-    "beta", 
-    "gamma", 
-    "delta",      
+    "gamma",
 ]
 
 
@@ -504,22 +695,44 @@ structures_phases = [
 
 for st in structures_phases:
     if "layered" in st:
-        mul_matrix=[[2,0,0], [0,2,0], [0,0,2]]
-        scale = [0.90, 1.15]  # was [0.97, 1.10]; layered_p1 EOS min at compressed edge
+        mul_matrix = [[2, 0, 0], [0, 2, 0], [0, 0, 2]]
+        # p1/p21 sit on the compressed edge; p-1/p2c reconstruct when expanded.
+        # Basin cut keeps one well; this window gives that well an interior minimum.
+        # layered_p1 minimum sat at the compressed edge of [0.86, 1.14]
+        scale = [0.76, 1.06]
+        volume_points = 11
+    elif st == "gamma":
+        mul_matrix = [[4, 0, 0], [0, 3, 0], [0, 0, 1]]
+        # Previous FIRE scan left this window with unconverged, uphill points.
+        # Probe again on converged LBFGS energies and stay off the expanded well.
+        scale = [0.88, 1.02]
+        volume_points = 11
     else:
-        mul_matrix=[[4,0,0], [0,3,0], [0,0,1]]
-        scale = [0.90, 1.14]  # was [0.97, 1.08]; gamma min at edge, delta near expanded edge
-    
-    path_file = f"{path_base}/{st}.cif"  
+        mul_matrix = [[4, 0, 0], [0, 3, 0], [0, 0, 1]]
+        # beta minimum was at the compressed edge of [0.90, 1.14]; alpha spikes above ~1.10
+        scale = [0.86, 1.08]
+        volume_points = 11
+
+    path_file = f"{path_base}/{st}.cif"
     # read relaxed structures
     equilibrium_atoms = read(path_file)
     # equilibrium_atoms = bulk('Al', 'fcc', a=4.05)
 
     # path to save phonopy data
-    path_data_phonopy = f"/home/a.burov/icys_2025/niohf/umlip_phonons/{potential}/{st}"
+    path_data_phonopy = str(_UMLP_OUT / potential / st)
 
     # perform phonopy calculations
-    calc_phonopy(equilibrium_atoms, env_used=env_used, mul_matrix=mul_matrix, scale=scale )
+    try:
+        calc_phonopy(
+            equilibrium_atoms,
+            env_used=env_used,
+            mul_matrix=mul_matrix,
+            scale=scale,
+            volume_points=volume_points,
+        )
+    except RuntimeError as exc:
+        print(f"{st}: skipped — {exc}")
+        continue
 
     # visualize data and save plots (no-op if phonopy-qha did not write files)
     visualize_data(potential=potential, structure=st)
@@ -527,7 +740,7 @@ for st in structures_phases:
     # save phonopy files
     save_files(path_data_phonopy)
 
-    print("Finished without errors!")
+    print(f"{st}: finished without errors")
 
 
     

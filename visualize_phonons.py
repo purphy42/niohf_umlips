@@ -28,6 +28,20 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+import sys
+from pathlib import Path
+
+def _repo_root():
+    here = Path.cwd().resolve()
+    for cand in [here, *here.parents]:
+        if (cand / "plot_colors.py").is_file():
+            return cand
+    raise FileNotFoundError("plot_colors.py not found from " + str(here))
+
+sys.path.insert(0, str(_repo_root()))
+from plot_colors import series_colors
+
 from tqdm import tqdm
 # from pymatgen.ext.matproj import MPRester
 from mp_api.client import MPRester
@@ -252,7 +266,7 @@ for vol_dir in sorted(base_path.glob("vol_*"))[:5]:
 # Plot
 if gibbs_data:
     fig, ax = plt.subplots(figsize=(12, 8))
-    colors = plt.cm.viridis(np.linspace(0, 1, len(gibbs_data)))
+    colors = series_colors(len(gibbs_data))
     
     for i, (vol_name, data) in enumerate(gibbs_data.items()):
         ax.plot(data['temperatures'], data['gibbs_kJmol'], 
@@ -262,7 +276,7 @@ if gibbs_data:
     temps = list(gibbs_data.values())[0]['temperatures']
     min_gibbs = np.array([min(d['gibbs_kJmol'][i] for d in gibbs_data.values()) 
                          for i in range(len(temps))])
-    ax.plot(temps, min_gibbs, 'r-', lw=5, label='Stable phase')
+    ax.plot(temps, min_gibbs, "-", color="#1A1A1A", lw=5, label="Stable phase")
     
     ax.set_xlabel('T (K)'); ax.set_ylabel('G (kJ/mol)')
     ax.set_title('NiOHF QHA - Ordered Displacement Processing', fontsize=16)

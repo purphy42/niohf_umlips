@@ -227,7 +227,16 @@ user_vasp_sets = [
     "IBRION": 1, "LMIXTAU": ".TRUE.", **pot_pack_rsf,}, 'over'),
 
 
-('9bulk_eos' , '9bulk',  {"IVDW": 11, "ISIF": 4, "EDIFF": 1e-5, "NSW": 100, "POTIM": 0.15, **dftu_packet_off}, 'over'),
+('9bulk_eos' , '9bulk',  {"ISIF": 2, "EDIFF": 1e-6, "NSW": 100, "POTIM": 0.15, "EDIFFG": -0.02, "IBRION": 2, "NELM": 200}, 'over'),
+# Layered structures: same EOS protocol as 9bulk_eos (DFT-D3, ISIF=4, ),
+# separate set name so those jobs do not reuse or overwrite 9bulk_eos.
+('9bulk_eos_vdw', '9bulk', {"GGA": "PS", "IVDW": 11, "ISIF": 2, "EDIFF": 1e-5, "NSW": 100, "POTIM": 0.15, 'KSPACING': 0.49,}, 'over'),
+# Diaspore EOS with PBEsol (GGA=PS). Same volume protocol as 9bulk_eos; no DFT-D3, .
+# PBE PAW potentials are the ones VASP expects with GGA=PS.
+('9bulk_eos_pbesol', '9bulk', {"GGA": "PS", "ISIF": 2, "EDIFF": 1e-5, "NSW": 100, "POTIM": 0.15, 'KSPACING': 0.49,}, 'over'),
+('9bulk_cell', '9bulk_eos', {"ISIF": 4, "EDIFF": 1e-6, "EDIFFG": -0.01}, 'over'),
+('9bulk_cell_vdw', '9bulk_cell', {"IVDW": 11}, 'over'),
+('9bulk_cell_pbesol', '9bulk_cell', {"GGA": "PS"}, 'over'),
 
 ('phonons_prio' , '9bulk',  {"NSW": 150, "EDIFF": 1e-7, "EDIFFG": -0.001, "LREAL": ".FALSE", "LWAVE": ".FALSE", }, 'over'),
 ('phonons_ibrion6_400' , 'phonons_prio',  {"ISIF": 3, "NFREE": 4, "IBRION": 6, "EDIFF": 1e-7, "PREC": "Accurate", "NSW": 1}, 'over'),
@@ -249,11 +258,21 @@ user_vasp_sets = [
 
 ('phonons_setup_rel' , 'phonons_prio',  {"KSPACING": 0.7, "ENCUT": 700, "ENAUG": 1050}, 'over'),
 ('phonons_setup_eos' , 'phonons_setup_rel',  {"ISIF": 4, "LREAL": ".FALSE.", "NSW": 150 }, 'over'),
+('phonons_setup_tight' , 'phonons_eos',  {"EDIFF": 1e-6, "EDIFFG": -0.01, 'KSPACING': 0.7}, 'over'),
 # Static forces on phonopy supercells (Gamma-only via add(..., ngkpt=[1,1,1]))
+# Tight SCF + reciprocal projection for clean FC (esp. light H displacements)
 ('phonons_disp' , 'phonons_setup_rel', {
     "IBRION": -1, "NSW": 0, "ISIF": 2, "EDIFF": 1e-8,
-    "PREC": "Accurate", "ADDGRID": ".TRUE.", "LREAL": ".FALSE.",
+    "NELM": 120, "PREC": "Accurate", "ADDGRID": ".TRUE.", "LREAL": ".FALSE.",
     "LWAVE": ".FALSE.", "LCHARG": ".FALSE.", "savefile": "ox",
+}, 'over'),
+# Born charges + macroscopic dielectric for phonopy NAC / LO–TO (primitive cell)
+# Use denser k-mesh (KSPACING), NOT Gamma-only. LEPSILON = DFPT dielectric response.
+('phonons_nac' , 'phonons_setup_rel', {
+    "IBRION": -1, "NSW": 0, "ISIF": 2, "EDIFF": 1e-8,
+    "NELM": 120, "PREC": "Accurate", "ADDGRID": ".TRUE.", "LREAL": ".FALSE.",
+    "LEPSILON": ".TRUE.", "LRPA": ".FALSE.",
+    "KSPACING": 0.35, "LWAVE": ".FALSE.", "LCHARG": ".FALSE.", "savefile": "ox",
 }, 'over'),
 
 ('1' ,'9', my_low_pack ),

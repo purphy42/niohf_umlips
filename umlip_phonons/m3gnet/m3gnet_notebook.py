@@ -123,7 +123,10 @@ plt.rcParams['figure.dpi'] = 450
 # In[7]:
 
 
-m3gnet_relaxer = Relaxer(potential='MP-2021.2.8-EFS')  # Use available model!
+# CRITICAL: relax_cell is a Relaxer __init__ argument (default True).
+# Passing relax_cell to .relax() is a no-op on classic m3gnet → every
+# "volume" point collapses back to Veq and the EOS span is ~0.
+m3gnet_relaxer = Relaxer(potential="MP-2021.2.8-EFS", relax_cell=False)
 
 
 # In[ ]:
@@ -165,8 +168,27 @@ potential = "m3gnet"
 # In[ ]:
 
 
+def _ensure_fixed_volume_relaxer(relaxer):
+    """Force atoms-only relaxation. relax_cell lives on Relaxer.__init__, not .relax()."""
+    import inspect
+    if getattr(relaxer, "relax_cell", None) is False:
+        return relaxer
+    pot = getattr(relaxer, "potential", None) or "MP-2021.2.8-EFS"
+    kwargs = {"potential": pot, "relax_cell": False}
+    try:
+        params = inspect.signature(Relaxer.__init__).parameters
+        for key, val in (("optimizer", getattr(relaxer, "optimizer", "FIRE")),
+                         ("stress_weight", getattr(relaxer, "stress_weight", None))):
+            if key in params and val is not None:
+                kwargs[key] = val
+    except (TypeError, ValueError):
+        pass
+    print("Rebuilding Relaxer with relax_cell=False (was True / unset)")
+    return Relaxer(**kwargs)
+
+
 def _m3gnet_relax_kwargs(relaxer, fmax, steps):
-    """Atoms-only relax when Relaxer supports relax_cell=False."""
+    """Kwargs for Relaxer.relax; also pass relax_cell=False if supported."""
     import inspect
     kwargs = {"fmax": fmax, "steps": steps, "verbose": False}
     try:
@@ -176,6 +198,28 @@ def _m3gnet_relax_kwargs(relaxer, fmax, steps):
     except (TypeError, ValueError):
         pass
     return kwargs
+
+
+def _lock_volume(atoms, target_cell):
+    """Restore target cell while keeping fractional coordinates."""
+    frac = atoms.get_scaled_positions()
+    atoms.set_cell(target_cell, scale_atoms=False)
+    atoms.set_scaled_positions(frac)
+    return atoms
+
+
+def _phonon_fig_dir():
+    for p in (
+        Path("/home/arseniy/Desktop/work/niohf/figures/phonons"),
+        Path("/home/a.burov/icys_2025/niohf/figures/phonons"),
+        Path("/home/a.burov/icys_2025/niohf/data/figures/phonons"),
+    ):
+        if p.exists() or p.parent.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            return str(p)
+    p = Path("/home/arseniy/Desktop/work/niohf/figures/phonons")
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
 
 def get_forces_from_potential(relaxer, structure):
@@ -206,39 +250,56 @@ def get_forces_from_relaxer(relaxer, structure):
 # In[ ]:
 
 
-def calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=[[1,0,0],[0,1,0],[0,0,1]], env_used="m3gnet-env", scale=[0.97, 1.10]):
+def calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=[[1,0,0],[0,1,0],[0,0,1]], env_used="m3gnet-env", scale=[0.97, 1.10], volume_points=11):
 
-    volume_scales = np.linspace(scale[0], scale[1], 6)
+    m3gnet_relaxer = _ensure_fixed_volume_relaxer(m3gnet_relaxer)
+    volume_scales = np.linspace(scale[0], scale[1], volume_points)
     volumes, energies = [], []
 
-    print("🚀 M3GNet QHA — pymatgen Relaxer, atoms-only, potential.get_efs forces")
+    for f in glob.glob("thermal_properties.yaml-*") + glob.glob("gibbs_V*.dat") + glob.glob("ev_point_*.dat"):
+        os.remove(f)
+
+    print("🚀 M3GNet QHA — fixed-volume (relax_cell=False) + potential.get_efs forces")
     relax_kwargs = _m3gnet_relax_kwargs(m3gnet_relaxer, fmax=1e-4, steps=400)
-    print(f"Relaxer.relax kwargs: {relax_kwargs}")
-    print(f"Using supercell {mul_matrix}")
+    print(f"Relaxer.relax_cell={getattr(m3gnet_relaxer, 'relax_cell', '?')}  kwargs={relax_kwargs}")
+    print(f"Using supercell {mul_matrix}; volume scales {scale[0]:.3f}→{scale[1]:.3f} ({volume_points} pts)")
 
     for i, scale_factor in enumerate(volume_scales):
-        print(f"\nVolume {i+1}/6: {scale_factor:.3f}")
+        print(f"\nVolume {i+1}/{volume_points}: {scale_factor:.3f}")
 
         scaled_atoms = equilibrium_atoms.copy()
         scaled_atoms.set_cell(equilibrium_atoms.get_cell() * scale_factor**(1/3), scale_atoms=True)
+        target_cell = scaled_atoms.get_cell().copy()
         vol_target = scaled_atoms.get_volume()
         structure = AseAtomsAdaptor.get_structure(scaled_atoms)
 
         result = m3gnet_relaxer.relax(structure, **relax_kwargs)
         final_structure = result["final_structure"]
-        final_energy = float(result["trajectory"].energies[-1])
         final_atoms = AseAtomsAdaptor.get_atoms(final_structure)
 
         vol = final_atoms.get_volume()
-        if abs(vol - vol_target) / vol_target > 0.02:
-            print(f"  ⚠️ volume drifted {vol_target:.3f} → {vol:.3f} Å³ (cell should stay fixed)")
+        if abs(vol - vol_target) / vol_target > 0.005:
+            print(f"  ⚠️ volume drifted {vol_target:.3f} → {vol:.3f} Å³; locking cell to target")
+            final_atoms = _lock_volume(final_atoms, target_cell)
+            final_structure = AseAtomsAdaptor.get_structure(final_atoms)
+            # ions were optimized at wrong V — short re-relax with cell locked
+            result = m3gnet_relaxer.relax(final_structure, **relax_kwargs)
+            final_structure = result["final_structure"]
+            final_atoms = AseAtomsAdaptor.get_atoms(final_structure)
+            if abs(final_atoms.get_volume() - vol_target) / vol_target > 0.005:
+                final_atoms = _lock_volume(final_atoms, target_cell)
+                final_structure = AseAtomsAdaptor.get_structure(final_atoms)
+
+        # energy at the locked volume (not trajectory last step at drifted cell)
+        _, final_energy = get_forces_from_potential(m3gnet_relaxer, final_structure)
+        vol = final_atoms.get_volume()
 
         volumes.append(vol)
         energies.append(final_energy)
-        print(f"✓ Vol={vol:.1f} Å³, E={final_energy:.6f}")
+        print(f"✓ Vol={vol:.2f} Å³ (target {vol_target:.2f}), E={final_energy:.6f}")
 
-        np.savetxt(f"gibbs_V{vol:.0f}.dat", [[vol, final_energy]],
-                   header=f"# V={vol:.1f} E={final_energy:.6f}")
+        np.savetxt(f"ev_point_{i:02d}.dat", [[vol, final_energy]],
+                   header=f"# V={vol:.4f} E={final_energy:.6f}")
 
         unitcell = PhonopyAtoms(
             symbols=final_atoms.get_chemical_symbols(),
@@ -268,6 +329,16 @@ def calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=[[1,0,0],[0,1,0],
         phonon.run_mesh([50, 50, 50])
         phonon.run_thermal_properties(t_step=10, t_max=1500, t_min=0)
         phonon.write_yaml_thermal_properties(f"thermal_properties.yaml-{i:02d}")
+
+    volumes = np.asarray(volumes, dtype=float)
+    energies = np.asarray(energies, dtype=float)
+    dv_frac = (volumes.max() - volumes.min()) / volumes.mean()
+    print(f"\nEOS span: ΔV/V = {dv_frac:.2%}  V=[{volumes.min():.2f}, {volumes.max():.2f}]")
+    if dv_frac < 0.03:
+        raise RuntimeError(
+            f"EOS volume collapsed (ΔV/V={dv_frac:.2%}). "
+            "Relaxer is still changing the cell — ensure Relaxer(..., relax_cell=False)."
+        )
 
     print("\n💾 Saving QHA dataset...")
     np.savetxt("e-v.dat", np.column_stack([volumes, energies]), fmt="%.8f",
@@ -349,7 +420,7 @@ def calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=[[1,0,0],[0,1,0],
 
 def visualize_data(potential, structure):
     """Helmholtz / α / G plots from phonopy-qha outputs."""
-    fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
+    fig_dir = _phonon_fig_dir()
     os.makedirs(fig_dir, exist_ok=True)
 
     qha_files = (
@@ -522,7 +593,16 @@ def save_files(path_save):
 # In[18]:
 
 
-path_base = "/home/a.burov/icys_2025/niohf/optimized/m3gnet/"
+path_base = (
+    "/home/arseniy/Desktop/work/niohf/optimized/m3gnet"
+    if Path("/home/arseniy/Desktop/work/niohf/optimized/m3gnet").exists()
+    else "/home/a.burov/icys_2025/niohf/optimized/m3gnet/"
+)
+_UMLP_OUT = (
+    Path("/home/arseniy/Desktop/work/niohf/umlip_phonons")
+    if Path("/home/arseniy/Desktop/work/niohf/umlip_phonons").exists()
+    else Path("/home/a.burov/icys_2025/niohf/umlip_phonons")
+)
 
 
 # In[19]:
@@ -572,9 +652,9 @@ for st in structures_phases:
     # equilibrium_atoms = bulk('Al', 'fcc', a=4.05)
 
     # path to save phonopy data
-    path_data_phonopy = f"/home/a.burov/icys_2025/niohf/umlip_phonons/{potential}/{st}"
+    path_data_phonopy = str(_UMLP_OUT / potential / st)
 
-    calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=mul_matrix, env_used=env_used, scale=scale)
+    calc_phonopy(equilibrium_atoms, m3gnet_relaxer, mul_matrix=mul_matrix, env_used=env_used, scale=scale, volume_points=11)
 
     # visualize data and save plots (no-op if phonopy-qha did not write files)
     visualize_data(potential=potential, structure=st)

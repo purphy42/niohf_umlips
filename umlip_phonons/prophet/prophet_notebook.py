@@ -30,7 +30,10 @@ import glob
 from pathlib import Path
 
 from ase.build import bulk
-from ase.constraints import ExpCellFilter
+try:
+    from ase.filters import ExpCellFilter
+except ImportError:
+    from ase.constraints import ExpCellFilter
 
 import pandas as pd
 
@@ -38,7 +41,8 @@ import pandas as pd
 # In[2]:
 
 
-from sevenn.sevennet_calculator import SevenNetCalculator
+MODEL_DIR = "/home/a.burov/soft/umlip/potentials"
+from prophet import KairosCalculator
 
 
 # In[3]:
@@ -79,38 +83,36 @@ plt.rcParams['figure.dpi'] = 450
 # In[7]:
 
 
-sevennet_cal = SevenNetCalculator(model="7net-mf-ompa", device='cpu', modal="mpa") 
+prophet_cal = KairosCalculator(
+    model_path=f"{MODEL_DIR}/prophet-oame-mbd.pt",
+    use_kernel=False,
+    device="cpu",
+)
+
+
+
+# In[ ]:
+
+
+
 
 
 # In[8]:
 
 
-# sevennet_cal = EAM(potential='/home/a.burov/potentials/EAM/Al-2009.eam.alloy')
- 
-
-
-# In[ ]:
-
-
-
+fontsize = 20
 
 
 # In[9]:
 
 
-fontsize = 20
+env_used = "prophet-env"
 
 
 # In[10]:
 
 
-env_used = "msdb"
-
-
-# In[11]:
-
-
-potential = "sevennet"
+potential = "prophet"
 
 
 # In[ ]:
@@ -119,91 +121,20 @@ potential = "sevennet"
 
 
 
-# In[12]:
-
-
-def _imaginary_mode_fraction(path):
-    """Fraction of mesh modes phonopy left out of the thermal integral."""
-    n_modes = n_int = None
-    with open(path) as handle:
-        for line in handle:
-            if line.startswith("num_modes:"):
-                n_modes = float(line.split(":")[1])
-            elif line.startswith("num_integrated_modes:"):
-                n_int = float(line.split(":")[1])
-            if n_modes is not None and n_int is not None:
-                break
-    if not n_modes or n_int is None:
-        return 0.0
-    return max(0.0, (n_modes - n_int) / n_modes)
-
-
-def _trim_imaginary_edges(volumes, energies, max_fraction=5e-4, factor=5.0):
-    """Drop edge volumes whose imaginary-mode fraction dwarfs the minimum.
-
-    Thermal expansion is dV/dT from the phonopy-qha fit. Imaginary modes on
-    the compressed edge kink F(V) next to the minimum and that derivative
-    jitters. One volume is kept on each side of the static minimum so the
-    fitted well stays interior.
-    """
-    yamls = sorted(
-        glob.glob("thermal_properties.yaml-[0-9]*"),
-        key=lambda p: int(p.rsplit("-", 1)[-1]),
-    )
-    if len(yamls) != len(volumes):
-        print(f"Skip imaginary-mode trim: {len(yamls)} yaml files vs {len(volumes)} volumes")
-        return volumes, energies
-    fracs = [_imaginary_mode_fraction(path) for path in yamls]
-    imin = int(np.argmin(energies))
-    limit = max(max_fraction, factor * fracs[imin])
-    lo, hi = 0, len(volumes) - 1
-    while lo < imin - 1 and fracs[lo] > limit:
-        print(
-            f"Excluding compressed edge V={volumes[lo]:.2f} Å³ "
-            f"({fracs[lo] * 100:.3f}% imaginary modes)"
-        )
-        lo += 1
-    while hi > imin + 1 and fracs[hi] > limit:
-        print(
-            f"Excluding expanded edge V={volumes[hi]:.2f} Å³ "
-            f"({fracs[hi] * 100:.3f}% imaginary modes)"
-        )
-        hi -= 1
-    if lo == 0 and hi == len(volumes) - 1:
-        return volumes, energies
-    keep = list(range(lo, hi + 1))
-    for new_i, old_i in enumerate(keep):
-        os.rename(yamls[old_i], f"thermal_properties.yaml-keep-{new_i:02d}")
-    for path in glob.glob("thermal_properties.yaml-[0-9]*"):
-        os.remove(path)
-    for new_i in range(len(keep)):
-        os.rename(
-            f"thermal_properties.yaml-keep-{new_i:02d}",
-            f"thermal_properties.yaml-{new_i:02d}",
-        )
-    volumes = [volumes[i] for i in keep]
-    energies = [energies[i] for i in keep]
-    np.savetxt(
-        "e-v.dat",
-        np.column_stack([volumes, energies]),
-        fmt="%.8f",
-        header="# volume(Å³)  energy(eV)",
-    )
-    print(f"QHA volumes after imaginary-mode trim: {len(volumes)}")
-    return volumes, energies
+# In[11]:
 
 
 def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_used="msdb", scale=[0.97, 1.10] ):
 
-    # 11 points: a 6-point fit leaves V(T) jitter of ~0.01 Å³, which shows up as spikes in α(T).
-    volume_points = 11
+    # Volume scaling
+    volume_points = 6
     scale_init = scale[0]
     scale_end = scale[1]
     volume_scales = np.linspace(scale_init, scale_end, volume_points)
     volumes = []
     energies = []
     
-    print("Starting QHA calculation with SevenNet...")
+    print("Starting QHA calculation with prophet...")
     
     for i, scale in enumerate(volume_scales):
         print(f"\n{'='*60}")
@@ -215,7 +146,7 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
         scaled_atoms.set_cell(equilibrium_atoms.get_cell() * scale**(1/3), scale_atoms=True)
         
         # Relax at fixed volume
-        scaled_atoms.calc = sevennet_cal
+        scaled_atoms.calc = prophet_cal
         opt = FIRE(scaled_atoms, trajectory=f"vol_{i:02d}_relax.traj", logfile=f"vol_{i:02d}_opt.log", dt=0.05)
         opt.run(fmax=1e-4, steps=500)
         
@@ -234,7 +165,8 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
         )
         
         # Create Phonopy object
-        phonon = Phonopy(unitcell, supercell_matrix=mul_matrix)  # Changed: use mul_matrix parameter
+        # 'P' keeps the input cell axes (phonopy >=2.44 otherwise permutes them).
+        phonon = Phonopy(unitcell, supercell_matrix=mul_matrix, primitive_matrix="P")
         phonon.generate_displacements(distance=0.02)
 
         # Get supercell information
@@ -261,7 +193,7 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
                 cell=scell.cell,
                 pbc=True
             )
-            atoms_disp.calc = sevennet_cal
+            atoms_disp.calc = prophet_cal
             forces = atoms_disp.get_forces()
             sets_of_forces.append(forces)
         
@@ -278,26 +210,55 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
     np.savetxt("e-v.dat", np.column_stack([volumes, energies]), 
                fmt="%.8f", header="# volume(Å³)  energy(eV)")
     print("\nSaved e-v.dat")
-    volumes, energies = _trim_imaginary_edges(volumes, energies)
     
-    # Use the msdb environment directly
-    phonopy_qha_path = f'/home/a.burov/micromamba/envs/{env_used}/bin/phonopy-qha'
-    
-    print(f"\nRunning phonopy-qha from: {phonopy_qha_path}")
-    
-    result = subprocess.run(
-        f"{phonopy_qha_path} -p -s --tmax=1000 --cutoff-frequency 0.1 e-v.dat thermal_properties.yaml-*",
-        shell=True,
-        capture_output=True,
-        text=True
+    yaml_files = sorted(glob.glob("thermal_properties.yaml-*"))
+    if not yaml_files:
+        raise FileNotFoundError("No thermal_properties.yaml-* written; cannot run phonopy-qha")
+
+    phonopy_qha_path = None
+    for candidate in (
+        f"/home/a.burov/micromamba/envs/{env_used}/bin/phonopy-qha",
+        "/home/a.burov/micromamba/envs/msdb/bin/phonopy-qha",
+        shutil.which("phonopy-qha"),
+    ):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            phonopy_qha_path = candidate
+            break
+    if phonopy_qha_path is None:
+        raise FileNotFoundError(
+            f"phonopy-qha not found in {env_used} or msdb. Install phonopy there."
+        )
+
+    qha_env = os.environ.copy()
+    qha_env["MPLBACKEND"] = "Agg"
+    yaml_list = " ".join(yaml_files)
+    # -s writes the QHA files. Do not pass -p: that opens a GUI and aborts on a
+    # batch node before helmholtz-volume_fitted.dat exists.
+    cmd = (
+        f"{phonopy_qha_path} -s --tmax=1000 --cutoff-frequency 0.1 "
+        f"e-v.dat {yaml_list}"
     )
-    
-    if result.returncode == 0:
-        print("QHA complete!")
-        print(result.stdout)
-    else:
-        print("QHA failed:")
+    print(f"\nRunning phonopy-qha from: {phonopy_qha_path}")
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=qha_env)
+    if result.returncode != 0 and (
+        "unrecognized arguments" in (result.stderr or "")
+        or "invalid option" in (result.stderr or "").lower()
+    ):
+        print("phonopy-qha does not support --cutoff-frequency; retrying without it")
+        cmd = f"{phonopy_qha_path} -s --tmax=1000 e-v.dat {yaml_list}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=qha_env)
+
+    print(result.stdout)
+    if result.stderr:
         print(result.stderr)
+    if result.returncode != 0 or not os.path.isfile("helmholtz-volume_fitted.dat"):
+        raise RuntimeError(
+            "phonopy-qha did not write helmholtz-volume_fitted.dat.\n"
+            f"command: {cmd}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("QHA complete!")
 
 
 
@@ -313,15 +274,25 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
 
 
 
-# In[13]:
+# In[12]:
 
 
 def visualize_data(potential, structure):
     """Helmholtz / α / G plots from phonopy-qha outputs."""
-    fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
+    fig_dir = "/home/arseniy/Desktop/work/niohf/figures/phonons"
+    if not Path("/home/arseniy/Desktop/work/niohf").exists():
+        fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
     os.makedirs(fig_dir, exist_ok=True)
 
-    with open("helmholtz-volume_fitted.dat") as f:
+    helmholtz_path = Path("helmholtz-volume_fitted.dat")
+    if not helmholtz_path.is_file():
+        print(
+            "Skipping plots: phonopy-qha did not write helmholtz-volume_fitted.dat. "
+            "Check the QHA log above."
+        )
+        return
+
+    with open(helmholtz_path) as f:
         lines = f.readlines()
 
     fitted_start = None
@@ -415,7 +386,7 @@ def visualize_data(potential, structure):
 
 
 
-# In[14]:
+# In[13]:
 
 
 def save_files(path_save):
@@ -457,27 +428,15 @@ def save_files(path_save):
 
 
 
+# In[14]:
+
+
+_cluster_opt = Path("/home/a.burov/icys_2025/niohf/optimized/prophet")
+_local_opt = Path("/home/arseniy/Desktop/work/niohf/optimized/prophet")
+path_base = str(_cluster_opt if _cluster_opt.exists() else _local_opt)
+
+
 # In[15]:
-
-
-# Load equilibrium structure
-# equilibrium_atoms = read("/home/a.burov/icys_2025/niohf/optimized/dft/delta.cif")
-
-
-# In[16]:
-
-
-# equilibrium_atoms = bulk('Al', 'fcc', a=4.05)
-
-
-
-# In[17]:
-
-
-path_base = "/home/a.burov/icys_2025/niohf/optimized/sevenn/"
-
-
-# In[18]:
 
 
 structures_phases = [
@@ -494,7 +453,7 @@ structures_phases = [
 ]
 
 
-# In[ ]:
+# In[16]:
 
 
 for st in structures_phases:
@@ -504,7 +463,7 @@ for st in structures_phases:
     else:
         mul_matrix=[[4,0,0], [0,3,0], [0,0,1]]
         scale = [0.97, 1.08]
-         
+    
     path_file = f"{path_base}/{st}.cif"  
     # read relaxed structures
     equilibrium_atoms = read(path_file)
@@ -514,7 +473,7 @@ for st in structures_phases:
     path_data_phonopy = f"/home/a.burov/icys_2025/niohf/umlip_phonons/{potential}/{st}"
 
     # perform phonopy calculations
-    calc_phonopy(equilibrium_atoms, env_used="msdb", mul_matrix=mul_matrix, scale=scale )
+    calc_phonopy(equilibrium_atoms, env_used=env_used, mul_matrix=mul_matrix, scale=scale )
 
     # visualize data and save plots
     visualize_data(potential=potential, structure=st)

@@ -30,6 +30,21 @@ module load q-ch/vasp/5.4.4_mpich_mkl; \
 '
 }
 
+CLUSTERS['razor128_zen'] = {
+'address':'razor128',
+'vasp_com':'srun vasp_std',
+'homepath':'/home/a.burov/',
+'schedule':'SLURM',
+'corenum':16,
+'partition':'zen4',
+#'scratch':'/scr/a.burov/',
+'modules': 'source /etc/profile.d/modules.sh; \
+module load zen4/vasp/5.4.4_openmpi_gcc_aocl; \
+\nulimit -s unlimited\n\
+'
+}
+
+
 CLUSTERS['razor64'] = {
 'address':'razor64',
 'vasp_com':'mpirun -np 8 vasp_std',
@@ -45,21 +60,6 @@ module load q-ch/vasp/6.4.3; \
 '
 }
 
-# One SLURM job per displacement (Gamma-only supercells)
-CLUSTERS['zen4'] = {
-'address': 'razor128',
-'homepath': '/home/a.burov/',
-'schedule': 'SLURM',
-'corenum': 16,
-'partition': 'zen4',
-'walltime': '24:00:00',
-'any_commands': ['--mem=64G'],
-'vasp_com': 'srun vasp_gam',
-'modules': 'source /etc/profile.d/modules.sh; \
-module load zen4/vasp/5.4.4_openmpi_gcc_aocl; \
-ulimit -s unlimited\n\
-export OMP_NUM_THREADS=1\n',
-}
 
 
 """Local constants"""

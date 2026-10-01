@@ -28,6 +28,20 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+import sys
+from pathlib import Path
+
+def _repo_root():
+    here = Path.cwd().resolve()
+    for cand in [here, *here.parents]:
+        if (cand / "plot_colors.py").is_file():
+            return cand
+    raise FileNotFoundError("plot_colors.py not found from " + str(here))
+
+sys.path.insert(0, str(_repo_root()))
+from plot_colors import series_colors
+
 from tqdm import tqdm
 # from pymatgen.ext.matproj import MPRester
 from mp_api.client import MPRester
@@ -461,7 +475,7 @@ def plot_gibbs_comparison(all_results, base_path, save_plots=True):
     ax1, ax2, ax3, ax4 = axes.flatten()
     
     # Generate distinct colors for phases
-    colors = plt.cm.tab20(np.linspace(0, 1, len(all_results)))
+    colors = series_colors(len(all_results))
     
     # Store for analysis
     phase_min_gibbs = {}

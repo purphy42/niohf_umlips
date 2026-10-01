@@ -30,7 +30,10 @@ import glob
 from pathlib import Path
 
 from ase.build import bulk
-from ase.constraints import ExpCellFilter
+try:
+    from ase.filters import ExpCellFilter
+except ImportError:
+    from ase.constraints import ExpCellFilter
 
 import pandas as pd
 
@@ -38,9 +41,8 @@ import pandas as pd
 # In[2]:
 
 
-from alignn.ff.ff import AlignnAtomwiseCalculator,default_path
-from jarvis.io.vasp.inputs import Poscar
-from jarvis.core.atoms import ase_to_atoms
+MODEL_DIR = "/home/a.burov/soft/umlip/potentials"
+from tace.interface.ase import TACEAseCalc
 
 
 # In[3]:
@@ -51,35 +53,7 @@ from phonopy.interface.calculator import get_displacements_and_forces
 from phonopy.structure.atoms import PhonopyAtoms
 
 
-# In[ ]:
-
-
-
-
-
 # In[4]:
-
-
-def general_relaxer(ase_atoms="", calculator="", fmax=1e-4, steps=0, relax=True, max_step=0.1):
-    ase_atoms.calc = calculator
-    if not relax:
-         return ase_atoms.get_potential_energy()
-        
-    atoms_constrained = ExpCellFilter(ase_atoms)
-    dyn = FIRE(atoms_constrained, maxstep=max_step, dt=0.1)
-    dyn.run(fmax=fmax, steps=steps)
-    
-    return ase_atoms, dyn
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[5]:
 
 
 pd.set_option('display.max_rows', 500)
@@ -87,13 +61,13 @@ pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 1000)
 
 
-# In[6]:
+# In[5]:
 
 
 np.set_printoptions(precision=4)
 
 
-# In[7]:
+# In[6]:
 
 
 # %matplotlib inline
@@ -106,22 +80,15 @@ plt.rcParams['figure.dpi'] = 450
 
 
 
-# In[2]:
+# In[7]:
 
 
-path_base = "/home/a.burov/icys_2025/niohf/optimized/alignn/"
-
-
-# In[9]:
-
-
-model_path = "/home/a.burov/umlip/alignn/v12.2.2024_mp_1.5mill/"
-
-
-# In[10]:
-
-
-alignn_cal = AlignnAtomwiseCalculator(path=model_path, model_filename="best_model.pt")
+tace_cal = TACEAseCalc(
+    model=f"{MODEL_DIR}/TACE-OMAT24-L.pt",
+    dtype="float32",
+    device="cpu",
+    fidelity_idx=0,
+)
 
 
 
@@ -129,24 +96,24 @@ alignn_cal = AlignnAtomwiseCalculator(path=model_path, model_filename="best_mode
 
 
 
-
-
-# In[6]:
-
-
-fontsize = 20
-
-
-# In[7]:
-
-
-env_used = "alignn-env"
 
 
 # In[8]:
 
 
-potential = "alignn"
+fontsize = 20
+
+
+# In[9]:
+
+
+env_used = "tace-env"
+
+
+# In[10]:
+
+
+potential = "tace"
 
 
 # In[ ]:
@@ -155,20 +122,19 @@ potential = "alignn"
 
 
 
-# In[12]:
+# In[11]:
 
 
-def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_used="msdb", scale=[0.97, 1.10] ):
+def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_used="msdb", scale=[0.97, 1.10], volume_points=6):
 
     # Volume scaling
-    volume_points = 6
     scale_init = scale[0]
     scale_end = scale[1]
     volume_scales = np.linspace(scale_init, scale_end, volume_points)
     volumes = []
     energies = []
     
-    print("Starting QHA calculation with alignn...")
+    print("Starting QHA calculation with tace...")
     
     for i, scale in enumerate(volume_scales):
         print(f"\n{'='*60}")
@@ -180,9 +146,9 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
         scaled_atoms.set_cell(equilibrium_atoms.get_cell() * scale**(1/3), scale_atoms=True)
         
         # Relax at fixed volume
-        scaled_atoms.calc = alignn_cal
-        opt = FIRE(scaled_atoms, trajectory=f"vol_{i:02d}_relax.traj", logfile=f"vol_{i:02d}_opt.log", dt=0.03)
-        opt.run(fmax=1e-4, steps=1000)
+        scaled_atoms.calc = tace_cal
+        opt = FIRE(scaled_atoms, trajectory=f"vol_{i:02d}_relax.traj", logfile=f"vol_{i:02d}_opt.log", dt=0.05)
+        opt.run(fmax=1e-4, steps=500)
         
         vol = scaled_atoms.get_volume()
         en = scaled_atoms.get_potential_energy()
@@ -199,7 +165,8 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
         )
         
         # Create Phonopy object
-        phonon = Phonopy(unitcell, supercell_matrix=mul_matrix)  # Changed: use mul_matrix parameter
+        # 'P' keeps the input cell axes (phonopy >=2.44 otherwise permutes them).
+        phonon = Phonopy(unitcell, supercell_matrix=mul_matrix, primitive_matrix="P")
         phonon.generate_displacements(distance=0.02)
 
         # Get supercell information
@@ -226,7 +193,7 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
                 cell=scell.cell,
                 pbc=True
             )
-            atoms_disp.calc = alignn_cal
+            atoms_disp.calc = tace_cal
             forces = atoms_disp.get_forces()
             sets_of_forces.append(forces)
         
@@ -244,24 +211,54 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
                fmt="%.8f", header="# volume(Å³)  energy(eV)")
     print("\nSaved e-v.dat")
     
-    # Use the environment directly
-    phonopy_qha_path = f'/home/a.burov/micromamba/envs/{env_used}/bin/phonopy-qha'
-    
-    print(f"\nRunning phonopy-qha from: {phonopy_qha_path}")
-    
-    result = subprocess.run(
-        f"{phonopy_qha_path} -p -s --tmax=1000 --cutoff-frequency 0.1 e-v.dat thermal_properties.yaml-*",
-        shell=True,
-        capture_output=True,
-        text=True
+    yaml_files = sorted(glob.glob("thermal_properties.yaml-*"))
+    if not yaml_files:
+        raise FileNotFoundError("No thermal_properties.yaml-* written; cannot run phonopy-qha")
+
+    phonopy_qha_path = None
+    for candidate in (
+        f"/home/a.burov/micromamba/envs/{env_used}/bin/phonopy-qha",
+        "/home/a.burov/micromamba/envs/msdb/bin/phonopy-qha",
+        shutil.which("phonopy-qha"),
+    ):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            phonopy_qha_path = candidate
+            break
+    if phonopy_qha_path is None:
+        raise FileNotFoundError(
+            f"phonopy-qha not found in {env_used} or msdb. Install phonopy there."
+        )
+
+    qha_env = os.environ.copy()
+    qha_env["MPLBACKEND"] = "Agg"
+    yaml_list = " ".join(yaml_files)
+    # -s writes the QHA files. Do not pass -p: that opens a GUI and aborts on a
+    # batch node before helmholtz-volume_fitted.dat exists.
+    cmd = (
+        f"{phonopy_qha_path} -s --tmax=1000 --cutoff-frequency 0.1 "
+        f"e-v.dat {yaml_list}"
     )
-    
-    if result.returncode == 0:
-        print("QHA complete!")
-        print(result.stdout)
-    else:
-        print("QHA failed:")
+    print(f"\nRunning phonopy-qha from: {phonopy_qha_path}")
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=qha_env)
+    if result.returncode != 0 and (
+        "unrecognized arguments" in (result.stderr or "")
+        or "invalid option" in (result.stderr or "").lower()
+    ):
+        print("phonopy-qha does not support --cutoff-frequency; retrying without it")
+        cmd = f"{phonopy_qha_path} -s --tmax=1000 e-v.dat {yaml_list}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=qha_env)
+
+    print(result.stdout)
+    if result.stderr:
         print(result.stderr)
+    if result.returncode != 0 or not os.path.isfile("helmholtz-volume_fitted.dat"):
+        raise RuntimeError(
+            "phonopy-qha did not write helmholtz-volume_fitted.dat.\n"
+            f"command: {cmd}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    print("QHA complete!")
 
 
 
@@ -277,15 +274,25 @@ def calc_phonopy(equilibrium_atoms, mul_matrix=[[2,0,0], [0,2,0], [0,0,2]], env_
 
 
 
-# In[13]:
+# In[12]:
 
 
 def visualize_data(potential, structure):
     """Helmholtz / α / G plots from phonopy-qha outputs."""
-    fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
+    fig_dir = "/home/arseniy/Desktop/work/niohf/figures/phonons"
+    if not Path("/home/arseniy/Desktop/work/niohf").exists():
+        fig_dir = "/home/a.burov/icys_2025/niohf/data/figures/phonons"
     os.makedirs(fig_dir, exist_ok=True)
 
-    with open("helmholtz-volume_fitted.dat") as f:
+    helmholtz_path = Path("helmholtz-volume_fitted.dat")
+    if not helmholtz_path.is_file():
+        print(
+            "Skipping plots: phonopy-qha did not write helmholtz-volume_fitted.dat. "
+            "Check the QHA log above."
+        )
+        return
+
+    with open(helmholtz_path) as f:
         lines = f.readlines()
 
     fitted_start = None
@@ -379,7 +386,7 @@ def visualize_data(potential, structure):
 
 
 
-# In[14]:
+# In[13]:
 
 
 def save_files(path_save):
@@ -421,27 +428,15 @@ def save_files(path_save):
 
 
 
+# In[14]:
+
+
+_cluster_opt = Path("/home/a.burov/icys_2025/niohf/optimized/tace")
+_local_opt = Path("/home/arseniy/Desktop/work/niohf/optimized/tace")
+path_base = str(_cluster_opt if _cluster_opt.exists() else _local_opt)
+
+
 # In[15]:
-
-
-# Load equilibrium structure
-# equilibrium_atoms = read("/home/a.burov/icys_2025/niohf/optimized/dft/delta.cif")
-
-
-# In[16]:
-
-
-# equilibrium_atoms = bulk('Al', 'fcc', a=4.05)
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[18]:
 
 
 structures_phases = [
@@ -458,16 +453,20 @@ structures_phases = [
 ]
 
 
-# In[ ]:
+# In[16]:
 
 
 for st in structures_phases:
+    volume_points = 6
     if "layered" in st:
         mul_matrix=[[2,0,0], [0,2,0], [0,0,2]]
-        scale = [0.90, 1.15]  # was [0.97, 1.10]; layered_p1 EOS min at compressed edge
+        scale = [0.97, 1.10]
     else:
         mul_matrix=[[4,0,0], [0,3,0], [0,0,1]]
-        scale = [0.90, 1.14]  # was [0.97, 1.08]; gamma min at edge, delta near expanded edge
+        # [0.97, 1.08] put V(1000 K) past the largest volume
+        # (gamma leaves the grid at 510 K, alpha at 650 K).
+        scale = [0.97, 1.20]
+        volume_points = 8
     
     path_file = f"{path_base}/{st}.cif"  
     # read relaxed structures
@@ -478,7 +477,13 @@ for st in structures_phases:
     path_data_phonopy = f"/home/a.burov/icys_2025/niohf/umlip_phonons/{potential}/{st}"
 
     # perform phonopy calculations
-    calc_phonopy(equilibrium_atoms, env_used=env_used, mul_matrix=mul_matrix, scale=scale )
+    calc_phonopy(
+        equilibrium_atoms,
+        env_used=env_used,
+        mul_matrix=mul_matrix,
+        scale=scale,
+        volume_points=volume_points,
+    )
 
     # visualize data and save plots
     visualize_data(potential=potential, structure=st)
